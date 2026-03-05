@@ -5,6 +5,7 @@
   "engines": {
     "node": "20.x"
   },
+  "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "tsc && vite build",
