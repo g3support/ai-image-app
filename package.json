@@ -1,19 +1,10 @@
 {
-  "name": "ai-image-app",
-  "version": "1.0.0",
+  "name": "react-example",
+  "version": "0.0.0",
   "private": true,
   "engines": {
     "node": "20.x"
   },
-  "scripts": {
-    "start": "node server.js"
-  }
-}
-{
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "tsc && vite build",
@@ -21,6 +12,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
+  "type": "module",
   "dependencies": {
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
