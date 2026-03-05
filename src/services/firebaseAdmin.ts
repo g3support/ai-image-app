@@ -4,7 +4,7 @@ if (!admin.apps.length) {
 
   admin.initializeApp({
     credential: admin.credential.applicationDefault(),
-    storageBucket: "gen-lang-client-0039862552.appspot.com"
+    storageBucket: "gen-lang-client-0039862552-33f08.firebasestorage.app"
   });
 
 }
