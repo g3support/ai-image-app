@@ -3,7 +3,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import helmet from "helmet";
-import { IdentityEngine, GenerationContext } from "./src/engines/IdentityEngine.js";
+import { IdentityEngine } from "./src/engines/IdentityEngine.js";
 import { enforceFullBodyMargins, enhanceDetailingCrop } from "./src/utils/imageFramingUtils.js";
 import sharp from "sharp";
 import crypto from "crypto";
@@ -338,7 +338,7 @@ async function startServer() {
       }
 
       // Build common identity layer once
-      const ctx: GenerationContext = {
+      const ctx: any = {
         brandId,
         productId,
         characterId,
