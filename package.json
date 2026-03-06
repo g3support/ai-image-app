@@ -8,10 +8,10 @@
   },
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "tsc && vite build",
+    "build": "tsc -p tsconfig.server.json && node scripts/build-client.mjs",
     "start": "node dist/server.js",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

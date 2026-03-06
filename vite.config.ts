@@ -8,9 +8,9 @@ export default defineConfig(({mode}) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-      'process.env.API_KEY': JSON.stringify(env.API_KEY),
-      'process.env.G3_AI_IMAGE_CREATION': JSON.stringify(env.G3_AI_IMAGE_CREATION),
+      // Never expose server API secrets (for example GEMINI_API_KEY) to the client bundle.
+      // Frontend only needs a boolean signal to know whether a custom key is configured.
+      'process.env.G3_AI_IMAGE_CREATION': JSON.stringify(Boolean(env.G3_AI_IMAGE_CREATION)),
     },
     build: {
       outDir: 'dist/client',
