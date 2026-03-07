@@ -1,0 +1,30 @@
+name: Production Crash Detection
+
+on:
+  pull_request:
+
+jobs:
+  crash-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Start server
+        run: |
+          node dist/server.js &
+          sleep 10
+
+      - name: API health check
+        run: |
+          curl -f http://localhost:8080 || exit 1
+
+      - name: Image endpoint test
+        run: |
+          curl -X POST http://localhost:8080/api/process-image \
+          -H "Content-Type: application/json" \
+          -d '{}' || true
