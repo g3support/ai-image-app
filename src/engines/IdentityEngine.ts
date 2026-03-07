@@ -25,6 +25,7 @@ export interface CharacterProfile {
   gender: "female" | "male";
   baseSeed: number;
   faceReferenceUrl: string;
+  faceReferencePath?: string;
   defaultLighting: "soft-left" | "soft-right" | "studio-front";
   defaultFocalLength: number;
   defaultCameraDistance: "standard-full-body";
@@ -44,30 +45,41 @@ export class IdentityEngine {
     let character: CharacterProfile | null = null;
 
     if (ctx.characterId) {
-      character = await engine.fetchCharacter(ctx.brandId, ctx.characterId);
+      try {
+        character = await engine.fetchCharacter(ctx.brandId, ctx.characterId);
+      } catch (error: any) {
+        const message = String(error?.message || error || "");
+        if (message.includes("not found")) {
+          console.warn(`[IDENTITY] Character ${ctx.characterId} not found for brand ${ctx.brandId}. Continuing without identity lock.`);
+        } else {
+          throw error;
+        }
+      }
     }
 
-    const seedResult = resolveSeed(ctx.lockIdentity, character?.baseSeed);
+    const effectiveLockIdentity = Boolean(ctx.lockIdentity && character);
+
+    const seedResult = resolveSeed(effectiveLockIdentity, character?.baseSeed);
 
     const cameraPhysicsBlock =
-      getCameraPhysicsPrompt(ctx.lockIdentity);
+      getCameraPhysicsPrompt(effectiveLockIdentity);
 
     const lightingBlock =
       getLightingPrompt(
-        ctx.lockIdentity,
+        effectiveLockIdentity,
         character?.defaultLighting || "studio-front"
       );
 
     const genderRulesBlock =
       getGenderRulesPrompt(
         ctx.gender,
-        ctx.lockIdentity,
+        effectiveLockIdentity,
         ctx.productCategory
       );
 
     const resolvedStyling = resolveStyling(
       ctx.gender,
-      ctx.freezeStyling,
+      effectiveLockIdentity || ctx.freezeStyling,
       character?.defaultStyling || engine.getDefaultStyling(ctx.gender),
       ctx.stylingOverride
     );
@@ -76,7 +88,7 @@ export class IdentityEngine {
       getStylingPrompt(ctx.gender, resolvedStyling);
 
     const identityBlock =
-      engine.buildIdentityBlock(ctx.lockIdentity, character);
+      await engine.buildIdentityBlock(effectiveLockIdentity, character);
 
     return {
 
@@ -101,10 +113,24 @@ export class IdentityEngine {
 
   }
 
-  private buildIdentityBlock(
+
+  private async getShortLivedFaceUrl(character: CharacterProfile): Promise<string> {
+    if (character.faceReferencePath) {
+      const [signedUrl] = await bucket.file(character.faceReferencePath).getSignedUrl({
+        action: "read",
+        expires: Date.now() + 15 * 60 * 1000
+      });
+      return signedUrl;
+    }
+
+    // Backward compatibility for older records that persisted a long-lived URL.
+    return character.faceReferenceUrl;
+  }
+
+  private async buildIdentityBlock(
     lockIdentity: boolean,
     character: CharacterProfile | null
-  ): string {
+  ): Promise<string> {
 
     if (lockIdentity && character) {
 
@@ -114,7 +140,7 @@ export class IdentityEngine {
         Use the provided reference face EXACTLY.
 
         Reference image URL:
-        ${character.faceReferenceUrl}
+        ${await this.getShortLivedFaceUrl(character)}
 
       `;
 
@@ -235,7 +261,7 @@ export class IdentityEngine {
     const [faceReferenceUrl] =
       await file.getSignedUrl({
         action: "read",
-        expires: "03-01-2036"
+        expires: Date.now() + 15 * 60 * 1000
       });
 
     const newCharacter: CharacterProfile = {
@@ -248,6 +274,7 @@ export class IdentityEngine {
       baseSeed,
 
       faceReferenceUrl,
+      faceReferencePath: storagePath,
 
       defaultLighting: "studio-front",
       defaultFocalLength: 85,
@@ -297,50 +324,58 @@ export class IdentityEngine {
         .where("isDeleted", "==", false)
         .get();
 
-    return snapshot.docs.map(
+    const characters = snapshot.docs.map(
       doc => doc.data() as CharacterProfile
     );
+
+    return Promise.all(characters.map(async (character) => ({
+      ...character,
+      faceReferenceUrl: await this.getShortLivedFaceUrl(character)
+    })));
 
   }
 
   async updateCharacter(
+    brandId: string,
     id: string,
     updates: Partial<CharacterProfile>
   ): Promise<void> {
 
-    const snapshot =
-      await db
-        .collectionGroup("characters")
-        .where("id", "==", id)
-        .get();
+    const characterRef = db
+      .collection("brands")
+      .doc(brandId)
+      .collection("characters")
+      .doc(id);
 
-    if (!snapshot.empty) {
-
-      await snapshot.docs[0].ref.update({
-        ...updates,
-        updatedAt: Date.now()
-      });
-
+    const existing = await characterRef.get();
+    if (!existing.exists) {
+      throw new Error(`Character ${id} not found for brand ${brandId}`);
     }
+
+    await characterRef.update({
+      ...updates,
+      updatedAt: Date.now()
+    });
 
   }
 
-  async deleteCharacter(id: string): Promise<void> {
+  async deleteCharacter(brandId: string, id: string): Promise<void> {
 
-    const snapshot =
-      await db
-        .collectionGroup("characters")
-        .where("id", "==", id)
-        .get();
+    const characterRef = db
+      .collection("brands")
+      .doc(brandId)
+      .collection("characters")
+      .doc(id);
 
-    if (!snapshot.empty) {
-
-      await snapshot.docs[0].ref.update({
-        isDeleted: true,
-        updatedAt: Date.now()
-      });
-
+    const existing = await characterRef.get();
+    if (!existing.exists) {
+      throw new Error(`Character ${id} not found for brand ${brandId}`);
     }
+
+    await characterRef.update({
+      isDeleted: true,
+      updatedAt: Date.now()
+    });
 
   }
 

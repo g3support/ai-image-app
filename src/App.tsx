@@ -247,7 +247,7 @@ export default function App() {
       const response = await fetch(`/api/characters/${charId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates)
+        body: JSON.stringify({ brandId: "brand_vastra", ...updates })
       });
       if (response.ok) {
         await fetchCharacters();
@@ -271,7 +271,9 @@ export default function App() {
     if (!confirm("Are you sure you want to delete this character?")) return;
     try {
       const response = await fetch(`/api/characters/${charId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brandId: "brand_vastra" })
       });
       if (response.ok) {
         await fetchCharacters();
@@ -289,7 +291,11 @@ export default function App() {
 
     try {
       const deletePromises = selectedCharacterIds.map(id => 
-        fetch(`/api/characters/${id}`, { method: 'DELETE' })
+        fetch(`/api/characters/${id}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ brandId: "brand_vastra" })
+        })
       );
       
       await Promise.all(deletePromises);

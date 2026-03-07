@@ -9,6 +9,19 @@ import sharp from "sharp";
 import crypto from "crypto";
 import path from "path";
 import { db } from "./src/services/firebaseAdmin.js";
+import {
+  authenticateRequest,
+  enforceBrandAccess,
+  resolveAuthorizedBrandId
+} from "./src/server/security.js";
+import {
+  ALLOWED_FRAMES,
+  ALLOWED_GENDERS,
+  isBase64ImageDataUrl,
+  isValidString,
+  validateGenerateRequestBody
+} from "./src/server/validation.js";
+import { registerCharacterRoutes } from "./src/server/routes/characterRoutes.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -24,6 +37,12 @@ const MAX_CONCURRENT_GENERATIONS = parseInt(process.env.MAX_CONCURRENT || "2", 1
 const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "6", 10);
 const LOCK_TIMEOUT = parseInt(process.env.LOCK_TIMEOUT || "120000", 10);
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "3000", 10);
+const MAX_REQUEST_BYTES = parseInt(process.env.MAX_REQUEST_BYTES || String(20 * 1024 * 1024), 10);
+const MAX_IMAGE_BYTES = parseInt(process.env.MAX_IMAGE_BYTES || String(8 * 1024 * 1024), 10);
+const FRAME_TASK_CONCURRENCY = Math.max(1, parseInt(process.env.FRAME_TASK_CONCURRENCY || String(MAX_CONCURRENT_GENERATIONS), 10));
+
+sharp.cache(false);
+sharp.concurrency(Math.max(1, parseInt(process.env.SHARP_CONCURRENCY || "2", 10)));
 
 // Concurrency Limiter
 let activeGenerations = 0;
@@ -126,29 +145,39 @@ async function startServer() {
 
   app.use(express.json({ limit: '15mb' }));
 
-  // Request size and image validation
+  // Request size and image validation (without full body stringification to avoid memory amplification)
   app.use((req, res, next) => {
-    if (req.method === 'POST' && req.body) {
-      const bodyStr = JSON.stringify(req.body);
-      if (bodyStr.length > 20 * 1024 * 1024) {
-        return res.status(413).json({ success: false, error: "Request body too large (max 20MB)" });
-      }
-      
-      // Check for large images in body
-      const checkImages = (obj: any) => {
-        for (const key in obj) {
-          if (typeof obj[key] === 'string' && obj[key].startsWith('data:image')) {
-            const size = obj[key].length * 0.75; // Approx base64 to bytes
-            if (size > 8 * 1024 * 1024) return true;
-          } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-            if (checkImages(obj[key])) return true;
+    const contentLengthHeader = req.headers["content-length"];
+    const contentLength = typeof contentLengthHeader === "string" ? parseInt(contentLengthHeader, 10) : NaN;
+    if (!Number.isNaN(contentLength) && contentLength > MAX_REQUEST_BYTES) {
+      return res.status(413).json({ success: false, error: "Request body too large" });
+    }
+
+    if (req.method === 'POST' && req.body && typeof req.body === "object") {
+      const checkImages = (obj: any): boolean => {
+        if (!obj || typeof obj !== "object") return false;
+        if (Array.isArray(obj)) {
+          for (const item of obj) {
+            if (checkImages(item)) return true;
+          }
+          return false;
+        }
+
+        for (const key of Object.keys(obj)) {
+          const value = obj[key];
+          if (typeof value === 'string' && value.startsWith('data:image')) {
+            const payload = value.split(',')[1] || "";
+            const size = Math.ceil((payload.length * 3) / 4);
+            if (size > MAX_IMAGE_BYTES) return true;
+          } else if (typeof value === 'object' && value !== null) {
+            if (checkImages(value)) return true;
           }
         }
         return false;
       };
-      
+
       if (checkImages(req.body)) {
-        return res.status(400).json({ success: false, error: "Individual image size exceeds 8MB limit" });
+        return res.status(400).json({ success: false, error: "Individual image size exceeds allowed limit" });
       }
     }
     next();
@@ -160,12 +189,12 @@ async function startServer() {
   });
 
   // API routes
-  app.post("/api/compress-image", async (req, res) => {
+  app.post("/api/compress-image", authenticateRequest, async (req, res) => {
     try {
       if (isShuttingDown) return res.status(503).json({ success: false, error: "Server is shutting down" });
       const { imageBase64 } = req.body;
-      if (!imageBase64) return res.status(400).json({ success: false, error: "Missing image" });
-      
+      if (!isBase64ImageDataUrl(imageBase64)) return res.status(400).json({ success: false, error: "Invalid image format" });
+
       const buffer = Buffer.from(imageBase64.split(",")[1], "base64");
       
       const optimizedBuffer = await sharp(buffer)
@@ -181,12 +210,13 @@ async function startServer() {
     }
   });
 
-  app.post("/api/process-image", async (req, res) => {
+  app.post("/api/process-image", authenticateRequest, async (req, res) => {
     try {
       if (isShuttingDown) return res.status(503).json({ success: false, error: "Server is shutting down" });
       const { imageBase64, frame } = req.body;
-      if (!imageBase64) return res.status(400).json({ success: false, error: "Missing image" });
-      
+      if (!isBase64ImageDataUrl(imageBase64)) return res.status(400).json({ success: false, error: "Invalid image format" });
+      if (typeof frame !== "string" || !ALLOWED_FRAMES.has(frame)) return res.status(400).json({ success: false, error: "Invalid frame" });
+
       const buffer = Buffer.from(imageBase64.split(",")[1], "base64");
       let processedBuffer = buffer;
 
@@ -210,61 +240,12 @@ async function startServer() {
     }
   });
 
-  app.post("/api/characters/save", async (req, res) => {
-    try {
-      if (isShuttingDown) return res.status(503).json({ success: false, error: "Server is shutting down" });
-      const { brandId, name, referenceImageBase64, gender, defaultStyling } = req.body;
-      if (!brandId || !name || !referenceImageBase64) {
-        return res.status(400).json({ success: false, error: "Missing required fields" });
-      }
-      const characterId = await identityEngine.saveCharacter({
-        brandId,
-        name,
-        referenceImageBase64,
-        gender,
-        defaultStyling
-      });
-      res.json({ characterId });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
+  registerCharacterRoutes(app, identityEngine, () => isShuttingDown);
 
-  app.patch("/api/characters/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const updates = req.body;
-      await identityEngine.updateCharacter(id, updates);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  app.delete("/api/characters/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      await identityEngine.deleteCharacter(id);
-      res.json({ success: true });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  app.get("/api/characters/list", async (req, res) => {
-    try {
-      const brandId = (req.query.brandId as string) || "brand_vastra";
-      const characters = await identityEngine.getCharactersByBrand(brandId);
-      res.json({ characters });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  app.post("/api/generate", async (req, res) => {
+  app.post("/api/generate", authenticateRequest, enforceBrandAccess, async (req, res) => {
     const startTime = Date.now();
     const requestId = crypto.randomUUID();
-    const abortController = new AbortController();
+    const requestAbortController = new AbortController();
 
     // 1. Enable Streaming Response
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -277,7 +258,7 @@ async function startServer() {
 
     // Unified Abort Handling
     const cleanup = () => {
-      abortController.abort();
+      requestAbortController.abort();
     };
     req.on("close", cleanup);
     
@@ -288,7 +269,7 @@ async function startServer() {
         dupattaMode = 'WITH_DUPATTA', 
         identityLocked = false, 
         freezeStyling = false,
-        brandId = "brand_vastra",
+        brandId: _requestedBrandId,
         productId = "prod_default",
         characterId = undefined,
         stylingOverride,
@@ -303,6 +284,16 @@ async function startServer() {
         frame: req.body.frame || 'Full Body Front', 
         requestHash: req.body.requestHash 
       }];
+
+      const brandId = resolveAuthorizedBrandId(req);
+      req.body.brandId = brandId;
+
+      const validationError = validateGenerateRequestBody(req.body);
+      if (validationError) {
+        sendEvent("error", { message: validationError });
+        res.end();
+        return;
+      }
 
       // 0. Frame Count Validation
       if (framesInput.length > MAX_FRAMES) {
@@ -327,7 +318,8 @@ async function startServer() {
       }
       
       if (activeGenerations >= MAX_CONCURRENT_GENERATIONS) {
-        res.status(429).json({ success: false, error: "Server busy. Try again shortly." });
+        sendEvent("error", { message: "Server busy. Try again shortly." });
+        res.end();
         return;
       }
 
@@ -404,7 +396,7 @@ async function startServer() {
         if (lockResult.action === "wait_and_poll") {
           const pollStart = Date.now();
           while (Date.now() - pollStart < 30000) {
-            if (abortController.signal.aborted) throw new Error("Client disconnected");
+            if (requestAbortController.signal.aborted) throw new Error("Client disconnected");
             await new Promise(r => setTimeout(r, POLL_INTERVAL));
             const pollDoc = await cacheRef.get();
             const pollData = pollDoc.data();
@@ -564,9 +556,10 @@ async function startServer() {
 
           while (attempt <= MAX_RETRIES) {
             totalRetries = attempt;
-            if (abortController.signal.aborted) throw new Error("Client disconnected");
+            if (requestAbortController.signal.aborted) throw new Error("Client disconnected");
             
-            const timeout = setTimeout(() => abortController.abort(), 90000);
+            const frameAbortController = new AbortController();
+            const timeout = setTimeout(() => frameAbortController.abort(), 90000);
             try {
               const response = await (ai.models.generateContent as any)({
                 model: modelName,
@@ -575,7 +568,7 @@ async function startServer() {
                   imageConfig: { aspectRatio: "3:4", imageSize: '1K' },
                   seed: identityLayer.seed || Math.floor(Math.random() * 1000000)
                 },
-                signal: abortController.signal
+                signal: frameAbortController.signal
               });
 
               let generatedImageBuffer: Buffer | null = null;
@@ -679,7 +672,7 @@ async function startServer() {
 
       // 5. Parallel Execution with Limit 2
       const tasks = framesInput.map(f => () => generateFrameTask(f));
-      const results = await runWithLimit(tasks, 2);
+      const results = await runWithLimit(tasks, FRAME_TASK_CONCURRENCY);
 
       const durationMs = Date.now() - startTime;
       
@@ -718,24 +711,30 @@ async function startServer() {
     }
   });
 
-  app.post("/api/refinement/check", async (req, res) => {
+  app.post("/api/refinement/check", authenticateRequest, async (req, res) => {
     try {
       const { generationId } = req.body;
       if (!generationId) return res.status(400).json({ success: false, error: "Missing generationId" });
 
-      const logDoc = await db.collection("generation_logs").doc(generationId).get();
-      if (!logDoc.exists) return res.status(404).json({ success: false, error: "Generation not found" });
+      const logRef = db.collection("generation_logs").doc(generationId);
+      const transactionResult = await db.runTransaction(async (transaction) => {
+        const logDoc = await transaction.get(logRef);
+        if (!logDoc.exists) {
+          return { status: 404, payload: { success: false, error: "Generation not found" } };
+        }
 
-      const log = logDoc.data() as any;
-      if (log.refinement_count >= 2) {
-        return res.status(400).json({ success: false, error: "Maximum refinement attempts reached." });
-      }
+        const log = logDoc.data() as any;
+        const currentCount = Number(log?.refinement_count || 0);
+        if (currentCount >= 2) {
+          return { status: 400, payload: { success: false, error: "Maximum refinement attempts reached." } };
+        }
 
-      // Increment count
-      await db.collection("generation_logs").doc(generationId).update({
-        refinement_count: log.refinement_count + 1
+        const nextCount = currentCount + 1;
+        transaction.update(logRef, { refinement_count: nextCount });
+        return { status: 200, payload: { success: true, refinementCount: nextCount } };
       });
-      res.json({ success: true, refinementCount: log.refinement_count + 1 });
+
+      return res.status(transactionResult.status).json(transactionResult.payload);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
