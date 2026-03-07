@@ -45,30 +45,41 @@ export class IdentityEngine {
     let character: CharacterProfile | null = null;
 
     if (ctx.characterId) {
-      character = await engine.fetchCharacter(ctx.brandId, ctx.characterId);
+      try {
+        character = await engine.fetchCharacter(ctx.brandId, ctx.characterId);
+      } catch (error: any) {
+        const message = String(error?.message || error || "");
+        if (message.includes("not found")) {
+          console.warn(`[IDENTITY] Character ${ctx.characterId} not found for brand ${ctx.brandId}. Continuing without identity lock.`);
+        } else {
+          throw error;
+        }
+      }
     }
 
-    const seedResult = resolveSeed(ctx.lockIdentity, character?.baseSeed);
+    const effectiveLockIdentity = Boolean(ctx.lockIdentity && character);
+
+    const seedResult = resolveSeed(effectiveLockIdentity, character?.baseSeed);
 
     const cameraPhysicsBlock =
-      getCameraPhysicsPrompt(ctx.lockIdentity);
+      getCameraPhysicsPrompt(effectiveLockIdentity);
 
     const lightingBlock =
       getLightingPrompt(
-        ctx.lockIdentity,
+        effectiveLockIdentity,
         character?.defaultLighting || "studio-front"
       );
 
     const genderRulesBlock =
       getGenderRulesPrompt(
         ctx.gender,
-        ctx.lockIdentity,
+        effectiveLockIdentity,
         ctx.productCategory
       );
 
     const resolvedStyling = resolveStyling(
       ctx.gender,
-      ctx.freezeStyling,
+      effectiveLockIdentity || ctx.freezeStyling,
       character?.defaultStyling || engine.getDefaultStyling(ctx.gender),
       ctx.stylingOverride
     );
@@ -77,7 +88,7 @@ export class IdentityEngine {
       getStylingPrompt(ctx.gender, resolvedStyling);
 
     const identityBlock =
-      await engine.buildIdentityBlock(ctx.lockIdentity, character);
+      await engine.buildIdentityBlock(effectiveLockIdentity, character);
 
     return {
 

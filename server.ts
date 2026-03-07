@@ -245,7 +245,7 @@ async function startServer() {
   app.post("/api/generate", authenticateRequest, enforceBrandAccess, async (req, res) => {
     const startTime = Date.now();
     const requestId = crypto.randomUUID();
-    const abortController = new AbortController();
+    const requestAbortController = new AbortController();
 
     // 1. Enable Streaming Response
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -258,7 +258,7 @@ async function startServer() {
 
     // Unified Abort Handling
     const cleanup = () => {
-      abortController.abort();
+      requestAbortController.abort();
     };
     req.on("close", cleanup);
     
@@ -396,7 +396,7 @@ async function startServer() {
         if (lockResult.action === "wait_and_poll") {
           const pollStart = Date.now();
           while (Date.now() - pollStart < 30000) {
-            if (abortController.signal.aborted) throw new Error("Client disconnected");
+            if (requestAbortController.signal.aborted) throw new Error("Client disconnected");
             await new Promise(r => setTimeout(r, POLL_INTERVAL));
             const pollDoc = await cacheRef.get();
             const pollData = pollDoc.data();
@@ -556,9 +556,10 @@ async function startServer() {
 
           while (attempt <= MAX_RETRIES) {
             totalRetries = attempt;
-            if (abortController.signal.aborted) throw new Error("Client disconnected");
+            if (requestAbortController.signal.aborted) throw new Error("Client disconnected");
             
-            const timeout = setTimeout(() => abortController.abort(), 90000);
+            const frameAbortController = new AbortController();
+            const timeout = setTimeout(() => frameAbortController.abort(), 90000);
             try {
               const response = await (ai.models.generateContent as any)({
                 model: modelName,
@@ -567,7 +568,7 @@ async function startServer() {
                   imageConfig: { aspectRatio: "3:4", imageSize: '1K' },
                   seed: identityLayer.seed || Math.floor(Math.random() * 1000000)
                 },
-                signal: abortController.signal
+                signal: frameAbortController.signal
               });
 
               let generatedImageBuffer: Buffer | null = null;

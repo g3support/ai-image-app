@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { auth as firebaseAuth } from "../services/firebaseAdmin.js";
 
-export const AUTH_REQUIRED = process.env.AUTH_REQUIRED !== "false";
+export const AUTH_REQUIRED = process.env.AUTH_REQUIRED === "true";
 export const SERVICE_AUTH_TOKEN = process.env.SERVICE_AUTH_TOKEN || "";
 
 export function tokenEquals(left: string, right: string): boolean {
@@ -37,12 +37,10 @@ export async function authenticateRequest(req: express.Request, res: express.Res
 
 export function enforceBrandAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
   const decodedToken = (req as any).authContext?.decodedToken;
-  if (!decodedToken) return next();
-
   const tokenBrandId =
-    decodedToken.brandId ||
-    decodedToken.brand_id ||
-    (Array.isArray(decodedToken.brands) ? decodedToken.brands[0] : undefined);
+    decodedToken?.brandId ||
+    decodedToken?.brand_id ||
+    (Array.isArray(decodedToken?.brands) ? decodedToken.brands[0] : undefined);
 
   const requestBrandId = (req.body?.brandId as string | undefined) || (req.query?.brandId as string | undefined);
 
@@ -50,15 +48,38 @@ export function enforceBrandAccess(req: express.Request, res: express.Response, 
     return res.status(403).json({ success: false, error: "Forbidden for this brandId" });
   }
 
+  const resolvedBrandId = resolveAuthorizedBrandId(req);
+
+  // Attach server-authoritative brandId to request context for downstream handlers.
+  (req as any).brandId = resolvedBrandId;
+
+  // If a token brandId exists, prevent body/query spoofing by overriding request-visible brandId.
+  if (tokenBrandId && req.body && typeof req.body === "object") {
+    req.body.brandId = tokenBrandId;
+  }
+
   return next();
 }
 
 export function resolveAuthorizedBrandId(req: express.Request): string | undefined {
+  const authMethod = (req as any).authContext?.method as string | undefined;
   const decodedToken = (req as any).authContext?.decodedToken;
   const tokenBrandId =
     decodedToken?.brandId ||
     decodedToken?.brand_id ||
     (Array.isArray(decodedToken?.brands) ? decodedToken.brands[0] : undefined);
+
+  if (authMethod === "firebase") {
+    return tokenBrandId;
+  }
+
+  if (authMethod === "service-token") {
+    return (req.body?.brandId as string | undefined) || (req.query?.brandId as string | undefined);
+  }
+
+  if (AUTH_REQUIRED) {
+    return tokenBrandId;
+  }
 
   return tokenBrandId || (req.body?.brandId as string | undefined) || (req.query?.brandId as string | undefined);
 }

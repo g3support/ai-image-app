@@ -11,8 +11,8 @@ async function run() {
       message.includes('Cannot find module') && message.includes('vite');
 
     if (isMissingVite) {
-      console.warn('[build] Vite is not available in this environment. Skipping client build step.');
-      process.exit(0);
+      console.error('[build] Vite is not available in this environment. Client build cannot continue.');
+      process.exit(1);
     }
 
     throw error;
